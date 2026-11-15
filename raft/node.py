@@ -3,8 +3,8 @@ import logging
 import random
 from typing import Optional
 
-from config import Config
-from state import Role
+from .config import Config
+from .state import Role
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +65,8 @@ class RaftNode:
         )
 
     def _reset_election_timer(self) -> None:
+        if self._shutdown.is_set():
+            return  # Запоздавший RPC после stop() не должен оживлять таймер
         if self._election_timer and not self._election_timer.done():
             self._election_timer.cancel()
         self._election_timer = asyncio.create_task(self._election_timeout_task())
@@ -221,9 +223,8 @@ class RaftNode:
                 return {"term": self.current_term, "vote_granted": False}
 
             if term > self.current_term:
-                self.current_term = term
-                self.voted_for = None
-                self.role = Role.FOLLOWER
+                # Сбрасывает voted_for, leader_id и останавливает heartbeat, если были лидером
+                await self._become_follower_locked(term, None)
 
             vote_granted = False
             if self.voted_for in (None, candidate_id):
@@ -249,15 +250,11 @@ class RaftNode:
                 return {"term": self.current_term, "success": False}
 
             if term > self.current_term or self.role != Role.FOLLOWER:
-                self.current_term = term
-                self.voted_for = None
-                self.role = Role.FOLLOWER
-            
-            self.leader_id = leader_id
+                # При равном терме voted_for сохраняется: кандидат уже голосовал
+                # за себя в этом терме и не должен проголосовать второй раз
+                await self._become_follower_locked(term, leader_id)
 
-            if self._heartbeat_timer and not self._heartbeat_timer.done():
-                self._heartbeat_timer.cancel()
-                self._heartbeat_timer = None
+            self.leader_id = leader_id
 
         self._reset_election_timer()
         return {"term": self.current_term, "success": True}
