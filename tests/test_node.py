@@ -157,6 +157,39 @@ async def test_heartbeats_prevent_election(make_node):
     assert node.rpc_client.vote_calls == []
 
 
+async def test_reset_reuses_single_timer_task(make_node):
+    node = make_node()
+    await node.start()
+    timer = node._election_timer
+    tasks_before = len(asyncio.all_tasks())
+
+    for term in range(1, 101):
+        await node.handle_append_entries(term=term, leader_id="n2")
+        await node.handle_request_vote(term=term, candidate_id="n2")
+
+    assert node._election_timer is timer
+    assert not timer.done()
+    assert len(asyncio.all_tasks()) == tasks_before
+
+
+async def test_election_starts_not_earlier_than_min_timeout_after_last_heartbeat(make_node):
+    node = make_node(election_timeout=(0.15, 0.25))
+    await node.start()
+    loop = asyncio.get_running_loop()
+
+    for _ in range(10):
+        await node.handle_append_entries(term=1, leader_id="n2")
+        await asyncio.sleep(0.02)
+    last_heartbeat = loop.time()
+    await node.handle_append_entries(term=1, leader_id="n2")
+
+    await wait_until(lambda: node.rpc_client.vote_calls, timeout=1.0, interval=0.005)
+    elapsed = loop.time() - last_heartbeat
+
+    # Нижняя граница строгая; верхняя — max + запас на точность таймеров (Windows ~15 мс)
+    assert 0.15 <= elapsed <= 0.25 + 0.05
+
+
 # ---------- Выборы ----------
 
 async def test_follower_starts_election_after_timeout(make_node):

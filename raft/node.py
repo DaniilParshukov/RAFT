@@ -24,7 +24,9 @@ class RaftNode:
         self.votes_received: set[str] = set()
 
         # --- Таймеры ---
+        # Одна задача на всё время жизни ноды; сброс таймера лишь сдвигает дедлайн
         self._election_timer: Optional[asyncio.Task] = None
+        self._election_deadline: float = 0.0  # по часам event loop (loop.time())
         self._heartbeat_timer: Optional[asyncio.Task] = None
 
         self._lock = asyncio.Lock()
@@ -45,6 +47,7 @@ class RaftNode:
     async def start(self) -> None:
         log.info("Node %s starting as %s (quorum=%d)", self.id, self.role.value, self.quorum)
         self._reset_election_timer()
+        self._election_timer = asyncio.create_task(self._election_timer_task())
 
     async def stop(self) -> None:
         self._shutdown.set()
@@ -65,20 +68,35 @@ class RaftNode:
         )
 
     def _reset_election_timer(self) -> None:
-        if self._shutdown.is_set():
-            return  # Запоздавший RPC после stop() не должен оживлять таймер
-        if self._election_timer and not self._election_timer.done():
-            self._election_timer.cancel()
-        self._election_timer = asyncio.create_task(self._election_timeout_task())
-        #TODO: переиспользовать задачу
+        """O(1): только переносит дедлайн, задачу не трогает."""
+        loop = asyncio.get_running_loop()
+        self._election_deadline = loop.time() + self._random_election_timeout()
 
-    async def _election_timeout_task(self) -> None:
-        try:
-            await asyncio.sleep(self._random_election_timeout())
-            if self.role != Role.LEADER:
+    async def _election_timer_task(self) -> None:
+        """Спит до дедлайна; если за это время дедлайн сдвинули — досыпает до нового.
+
+        Сон не бывает длиннее election_timeout_max (дедлайн всегда ставится не дальше
+        now + max), поэтому таймер срабатывает в интервале [min, max] после последнего
+        сброса, даже если новый дедлайн оказался раньше того, до которого уже спим.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            delay = self._election_deadline - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+                continue
+
+            if self.role == Role.LEADER:
+                # Лидеру выборы не нужны — просто взводим таймер заново
+                self._reset_election_timer()
+                continue
+
+            try:
                 await self._start_election()
-        except asyncio.CancelledError:
-            pass
+            except Exception:
+                # Не даём упасть единственной задаче таймера — иначе нода больше никогда не начнёт выборы
+                log.exception("Node %s: election failed", self.id)
+                self._reset_election_timer()
 
     async def _heartbeat_task(self) -> None:
         try:
@@ -98,6 +116,8 @@ class RaftNode:
             self.votes_received = {self.id}
             self.leader_id = None
             term = self.current_term
+            # Если голосов не хватит — по этому дедлайну начнём следующие выборы
+            self._reset_election_timer()
 
         log.info("Node %s starts election, term=%d", self.id, term)
         if self.rpc_client is None:
@@ -114,11 +134,6 @@ class RaftNode:
             for peer_id, url in self.config.peers.items()
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
-
-        async with self._lock:
-            should_retry = self.role == Role.CANDIDATE and self.current_term == term
-        if should_retry:
-            self._reset_election_timer()
 
 
     async def _send_request_vote(self, peer_id: str, peer_url: str, term: int) -> None:
@@ -157,9 +172,7 @@ class RaftNode:
         self.leader_id = self.id
         log.info("Node %s became LEADER, term=%d", self.id, term)
 
-        if self._election_timer and not self._election_timer.done():
-            self._election_timer.cancel()
-
+        # Таймер выборов не отменяем: у лидера он срабатывает вхолостую (см. _election_timer_task)
         if self._heartbeat_timer and not self._heartbeat_timer.done():
             self._heartbeat_timer.cancel()
         self._heartbeat_timer = asyncio.create_task(self._heartbeat_task())
