@@ -17,7 +17,7 @@ async def main() -> None:
     await server.start()
 
     print(f"Node {config.node_id} listening on {config.host}:{config.port}")
-    print(f"Status API on http://{config.host}:{config.status_port}/status")
+    print(f"Client API on http://{config.host}:{config.api_port} (/status, /log)")
 
     try:
         await asyncio.Event().wait()

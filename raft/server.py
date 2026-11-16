@@ -4,11 +4,11 @@ from .config import Config
 from .node import RaftNode
 from .rpc_client import RpcClient
 from .rpc_server import build_rpc_app
-from .status_api import build_status_app
+from .client_api import build_client_app
 
 
 class NodeServer:
-    """Собирает ноду целиком: RaftNode + RPC-клиент + RPC-сервер + status API."""
+    """Собирает ноду целиком: RaftNode + RPC-клиент + RPC-сервер + клиентский API."""
 
     def __init__(self, config: Config):
         self.config = config
@@ -23,8 +23,8 @@ class NodeServer:
         # Сервера поднимаем до старта таймеров, чтобы нода сразу могла отвечать
         # RPC-сервер (межнодовые вызовы) — на основном порту
         await self._serve(build_rpc_app(self.node), self.config.port)
-        # Status API — на отдельном порту
-        await self._serve(build_status_app(self.node), self.config.status_port)
+        # Клиентский REST API (status, log) — на отдельном порту
+        await self._serve(build_client_app(self.node), self.config.api_port)
 
         await self.node.start()
 

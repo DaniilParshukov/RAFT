@@ -24,14 +24,14 @@ def test_from_env(monkeypatch):
     monkeypatch.setenv("PORT", "8001")
     monkeypatch.setenv("PEERS", "node2=http://127.0.0.1:8002")
     monkeypatch.delenv("HOST", raising=False)
-    monkeypatch.delenv("STATUS_PORT", raising=False)
+    monkeypatch.delenv("API_PORT", raising=False)
 
     cfg = Config.from_env()
 
     assert cfg.node_id == "node1"
     assert cfg.host == "127.0.0.1"
     assert cfg.port == 8001
-    assert cfg.status_port == 9001
+    assert cfg.api_port == 9001
     assert cfg.peers == {"node2": "http://127.0.0.1:8002"}
 
 
@@ -39,13 +39,13 @@ def test_from_env_overrides(monkeypatch):
     monkeypatch.setenv("NODE_ID", "node1")
     monkeypatch.setenv("PORT", "8001")
     monkeypatch.setenv("HOST", "0.0.0.0")
-    monkeypatch.setenv("STATUS_PORT", "7000")
+    monkeypatch.setenv("API_PORT", "7000")
     monkeypatch.delenv("PEERS", raising=False)
 
     cfg = Config.from_env()
 
     assert cfg.host == "0.0.0.0"
-    assert cfg.status_port == 7000
+    assert cfg.api_port == 7000
     assert cfg.peers == {}
 
 

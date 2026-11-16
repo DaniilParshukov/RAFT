@@ -87,12 +87,14 @@ async def test_leader_steps_down_on_higher_term_vote_request(make_node):
     await node._start_election()
     assert node.role == Role.LEADER
 
-    resp = await node.handle_request_vote(term=node.current_term + 1, candidate_id="n2")
+    resp = await node.handle_request_vote(term=node.current_term + 1, candidate_id="n2",
+                                          last_log_index=node.log.last_index,
+                                          last_log_term=node.log.last_term)
 
     assert resp["vote_granted"] is True
     assert node.role == Role.FOLLOWER
     assert node.leader_id is None  # старый лидер не должен считать лидером себя
-    await wait_until(lambda: node._heartbeat_timer is None or node._heartbeat_timer.done())
+    assert node._replication_tasks == {}
 
 
 # ---------- AppendEntries ----------
@@ -209,9 +211,10 @@ async def test_request_vote_sent_to_every_peer(make_node):
 
     await node._start_election()
 
+    expected = {"term": 1, "candidate_id": "n1", "last_log_index": 0, "last_log_term": 0}
     assert sorted(node.rpc_client.vote_calls, key=lambda c: c[0]) == [
-        (peer_url("n2"), {"term": 1, "candidate_id": "n1"}),
-        (peer_url("n3"), {"term": 1, "candidate_id": "n1"}),
+        (peer_url("n2"), expected),
+        (peer_url("n3"), expected),
     ]
 
 
@@ -315,7 +318,10 @@ async def test_leader_sends_heartbeats_to_all_peers(make_node):
     for pid in ("n2", "n3"):
         sent = [p for url, p in calls if url == peer_url(pid)]
         assert len(sent) >= 3, f"мало heartbeat'ов к {pid}: {len(sent)}"
-        assert all(p == {"term": node.current_term, "leader_id": "n1"} for p in sent)
+        assert all(p["term"] == node.current_term and p["leader_id"] == "n1" for p in sent)
+        # Первый запрос несёт no-op лидера, после подтверждения — пустые heartbeat'ы
+        assert sent[0]["entries"] == [{"term": node.current_term, "command": None}]
+        assert all(p["entries"] == [] and p["prev_log_index"] == 1 for p in sent[1:])
 
 
 async def test_leader_does_not_start_elections(make_node):
@@ -339,7 +345,7 @@ async def test_leader_steps_down_on_higher_term_in_heartbeat_response(make_node)
 
     assert node.current_term == 9
     assert node.leader_id is None
-    await wait_until(lambda: node._heartbeat_timer is None or node._heartbeat_timer.done())
+    assert node._replication_tasks == {}
 
 
 async def test_leader_stays_leader_when_peers_unreachable(make_node):
@@ -357,10 +363,12 @@ async def test_leader_stays_leader_when_peers_unreachable(make_node):
 async def test_stop_cancels_timers(make_node):
     node = make_node(heartbeat_interval=0.02)
     await become_leader(node)
+    tasks = list(node._replication_tasks.values())
+    assert len(tasks) == 2
 
     await node.stop()
 
-    assert node._heartbeat_timer.done()
+    assert all(t.done() for t in tasks)
     assert node._election_timer is None or node._election_timer.done()
 
 
@@ -388,4 +396,10 @@ async def test_status(make_node):
         "leader_id": "n1",
         "voted_for": "n1",
         "votes_received": ["n1", "n3"],
+        "last_log_index": 1,  # no-op нового лидера
+        "last_log_term": 1,
+        "commit_index": 0,
+        "last_applied": 0,
+        "next_index": {"n2": 1, "n3": 1},
+        "match_index": {"n2": 0, "n3": 0},
     }

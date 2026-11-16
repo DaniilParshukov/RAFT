@@ -26,7 +26,7 @@ class Cluster:
         ports = free_ports(size * 2)
         self.ids = [f"node{i + 1}" for i in range(size)]
         self.rpc_ports = dict(zip(self.ids, ports[:size]))
-        self.status_ports = dict(zip(self.ids, ports[size:]))
+        self.api_ports = dict(zip(self.ids, ports[size:]))
         self.servers: dict[str, NodeServer] = {}
 
     def config(self, node_id: str) -> Config:
@@ -34,7 +34,7 @@ class Cluster:
             node_id=node_id,
             host="127.0.0.1",
             port=self.rpc_ports[node_id],
-            status_port=self.status_ports[node_id],
+            api_port=self.api_ports[node_id],
             peers={pid: f"http://127.0.0.1:{self.rpc_ports[pid]}"
                    for pid in self.ids if pid != node_id},
             **FAST_TIMINGS,
@@ -155,14 +155,89 @@ async def test_no_leader_without_quorum(cluster_of):
     assert survivor.leader_id is None
 
 
-async def test_status_api_over_http(cluster_of):
+async def test_client_api_status_over_http(cluster_of):
     cluster = await cluster_of(3)
     leader = await cluster.wait_for_leader()
 
     async with aiohttp.ClientSession() as session:
-        for node_id, port in cluster.status_ports.items():
+        for node_id, port in cluster.api_ports.items():
             async with session.get(f"http://127.0.0.1:{port}/status") as resp:
                 body = await resp.json()
             assert body["id"] == node_id
             assert body["leader_id"] == leader.id
             assert body["role"] == ("leader" if node_id == leader.id else "follower")
+
+
+# ---------- Репликация через клиентский REST API ----------
+
+def api_url(cluster: Cluster, node_id: str, path: str) -> str:
+    return f"http://127.0.0.1:{cluster.api_ports[node_id]}{path}"
+
+
+async def test_append_via_rest_is_replicated_to_all(cluster_of):
+    cluster = await cluster_of(3)
+    leader = await cluster.wait_for_leader()
+
+    async with aiohttp.ClientSession() as session:
+        for i in range(5):
+            async with session.post(api_url(cluster, leader.id, "/log"),
+                                    json={"command": {"set": "x", "value": i}}) as resp:
+                assert resp.status == 200
+                body = await resp.json()
+            assert body["committed"] is True
+            assert body["term"] == leader.current_term
+
+        def all_committed() -> bool:
+            return all(n.commit_index == body["index"] for n in cluster.nodes())
+        await wait_until(all_committed)
+
+        views = []
+        for node_id in cluster.ids:
+            async with session.get(api_url(cluster, node_id, "/log")) as resp:
+                views.append(await resp.json())
+
+    assert all(v == views[0] for v in views)
+    log = views[0]
+    assert log["commit_index"] == log["last_applied"] == body["index"]
+    assert [e["command"] for e in log["entries"] if e["command"] is not None] == [
+        {"set": "x", "value": i} for i in range(5)]
+    assert all(e["committed"] for e in log["entries"])
+
+
+async def test_append_via_rest_on_follower_points_to_leader(cluster_of):
+    cluster = await cluster_of(3)
+    leader = await cluster.wait_for_leader()
+    follower = next(n for n in cluster.nodes() if n is not leader)
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(api_url(cluster, follower.id, "/log"), json={"command": "x"}) as resp:
+            assert resp.status == 421
+            assert await resp.json() == {"error": "not_leader", "leader_id": leader.id}
+
+
+async def test_committed_entries_survive_leader_failure(cluster_of):
+    cluster = await cluster_of(3)
+    old = await cluster.wait_for_leader()
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(api_url(cluster, old.id, "/log"), json={"command": "before"}) as resp:
+            assert resp.status == 200
+
+        await cluster.kill(old.id)
+        new = await cluster.wait_for_leader()
+
+        async with session.post(api_url(cluster, new.id, "/log"), json={"command": "after"}) as resp:
+            assert resp.status == 200
+
+        await cluster.start(old.id)  # вернулся с пустым логом — лидер дошлёт всё
+        await cluster.wait_for_leader()
+        leader = cluster.leaders()[0]
+
+        def caught_up() -> bool:
+            return all(n.commit_index == leader.log.last_index for n in cluster.nodes())
+        await wait_until(caught_up)
+
+        async with session.get(api_url(cluster, old.id, "/log")) as resp:
+            log = await resp.json()
+
+    assert [e["command"] for e in log["entries"] if e["command"] is not None] == ["before", "after"]

@@ -12,6 +12,8 @@ def build_rpc_app(node) -> web.Application:
         result = await node.handle_request_vote(
             term=data["term"],
             candidate_id=data["candidate_id"],
+            last_log_index=data["last_log_index"],
+            last_log_term=data["last_log_term"],
         )
         return web.json_response(result)
 
@@ -20,6 +22,10 @@ def build_rpc_app(node) -> web.Application:
         result = await node.handle_append_entries(
             term=data["term"],
             leader_id=data["leader_id"],
+            prev_log_index=data["prev_log_index"],
+            prev_log_term=data["prev_log_term"],
+            entries=data["entries"],
+            leader_commit=data["leader_commit"],
         )
         return web.json_response(result)
 

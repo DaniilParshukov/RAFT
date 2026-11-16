@@ -15,27 +15,32 @@ class Config:
     heartbeat_interval: float = 0.050
     rpc_timeout: float = 0.100
 
-    # Порт status API; по умолчанию port + 1000
-    status_port: Optional[int] = None
+    # Сколько записей лидер шлёт пиру в одном AppendEntries
+    max_entries_per_rpc: int = 64
+    # Сколько POST /log ждёт коммита записи, прежде чем ответить 504
+    commit_timeout: float = 2.0
+
+    # Порт клиентского REST API (status/log); по умолчанию port + 1000
+    api_port: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if self.status_port is None:
-            self.status_port = self.port + 1000
+        if self.api_port is None:
+            self.api_port = self.port + 1000
 
     @classmethod
     def from_env(cls) -> "Config":
         node_id = os.environ["NODE_ID"]
         host = os.environ.get("HOST", "127.0.0.1")
         port = int(os.environ["PORT"])
-        status_port_raw = os.environ.get("STATUS_PORT")
-        status_port = int(status_port_raw) if status_port_raw else None
+        api_port_raw = os.environ.get("API_PORT")
+        api_port = int(api_port_raw) if api_port_raw else None
 
         return cls(
             node_id=node_id,
             host=host,
             port=port,
             peers=parse_peers(os.environ.get("PEERS", "")),
-            status_port=status_port,
+            api_port=api_port,
         )
 
 
